@@ -243,8 +243,8 @@ Environment variables will be managed outside the repository. An `.env.example` 
 
 ## 17. Approval
 
-**Prepared by:** [Your Name]  
-**Reviewed by:** [Mentor Name]  
+**Prepared by:** [Gopiprakan] 
+**Reviewed by:** [Shaurya Pandey]  
 **Approval status:** Pending  
 **Review date:** [To be confirmed]
 
