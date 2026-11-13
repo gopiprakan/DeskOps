@@ -225,7 +225,7 @@ Environment variables will be managed outside the repository. An `.env.example` 
 |---|---|
 | Individual or team assignment | Pending mentor confirmation |
 | Assigned product module | Pending mentor confirmation |
-| GitHub repository | Not yet provided |
+| GitHub repository | https://github.com/gopiprakan/DeskOps.git |
 | Client-specific rule (FR-1.08) | Pending mentor confirmation |
 | Final database relationships | To be reviewed |
 | External email provider | Mock endpoint available as fallback |
@@ -243,8 +243,7 @@ Environment variables will be managed outside the repository. An `.env.example` 
 
 ## 17. Approval
 
-**Prepared by:** [Your Name]  
-**Reviewed by:** [Mentor Name]  
+**Prepared by:** [Gopiprakan] 
+**Reviewed by:** [Shaurya Pandey]  
 **Approval status:** Pending  
 **Review date:** [To be confirmed]
-
