@@ -3,10 +3,10 @@
 **Project:** DeskOps – Service Desk Platform with an SLA Engine  
 **Phase:** Phase 1 – Ticketing Core  
 **Document ID:** LV-WD-DESKOPS-P1  
-**Version:** 0.1 – Draft  
+**Version:** 0.2 – Draft for mentor review  
 **Prepared by:** [Gopiprakan]  
-**Date:** 13 November 2026  
-**Status:** Pending mentor review and approval
+**Date:** 14 November 2026  
+**Status:** Pending mentor review and approval; module ownership and FR-1.08 are unconfirmed
 
 ---
 
@@ -247,3 +247,198 @@ Environment variables will be managed outside the repository. An `.env.example` 
 **Reviewed by:** [Shaurya Pandey]  
 **Approval status:** Pending  
 **Review date:** [To be confirmed]
+
+
+---
+
+## 18. Detailed Design Notes (Proposed for Mentor Review)
+
+The details below turn the requirements into an implementable design. Items described as "proposed" must be reviewed before they are treated as approved architecture.
+
+### 18.1 Tenant context and database integrity
+
+- The authenticated request must establish the user's organisation context on the server.
+- Tenant context must be derived from the authenticated account/session, not from a browser-supplied `organisationId`.
+- Every tenant-owned table must contain a non-null `organisationId` and be queried through tenant-scoped repositories.
+- The Organisation table is the tenant root; its `organisationId` is the tenant identifier. Child records reference that tenant.
+- Use composite uniqueness and foreign-key constraints where relationships must remain within one organisation (for example, `organisationId + propertyId` and `organisationId + ticketId`).
+- A missing or cross-tenant record should return HTTP 404 for the tenant-isolation acceptance test.
+- Seed data must be clearly labelled as sample data and must not contain production information.
+
+### 18.2 Proposed database relationships
+
+The following relationship model is an initial design proposal and must be checked against the assigned client rule before migrations are written.
+
+```mermaid
+erDiagram
+  ORGANISATION ||--o{ PROPERTY : owns
+  ORGANISATION ||--o{ USER : contains
+  PROPERTY ||--o{ UNIT : contains
+  UNIT ||--o{ TICKET : receives
+  USER ||--o{ TICKET : creates
+  USER ||--o| TECHNICIAN_PROFILE : may_have
+  TECHNICIAN_PROFILE ||--o{ TECHNICIAN_SKILL : has
+  TECHNICIAN_PROFILE ||--o{ TECHNICIAN_PROPERTY_COVERAGE : covers
+  PROPERTY ||--o{ TECHNICIAN_PROPERTY_COVERAGE : included_in
+  TICKET ||--o{ TICKET_EVENT : records
+  TICKET ||--o{ COMMENT : has
+  TICKET ||--o{ ATTACHMENT : has
+  TICKET ||--o{ WATCHER : followed_by
+  TICKET ||--o| ACTIVE_ASSIGNMENT : assigned_through
+```
+
+Proposed table responsibilities:
+
+| Table | Important fields / constraints |
+|---|---|
+| Organisation | `organisationId` tenant key, name, createdAt |
+| Property | organisationId, propertyId, name; unique within organisation |
+| Unit | organisationId, unitId, propertyId, unit label; property must belong to same organisation |
+| User | organisationId, userId, email, passwordHash, role, account status; unique email within organisation |
+| TechnicianProfile | organisationId, userId, availability/profile fields |
+| TechnicianSkill | organisationId, technicianUserId, skillId |
+| TechnicianPropertyCoverage | organisationId, technicianUserId, propertyId |
+| Ticket | organisationId, ticketId, unitId, createdBy, category, priority, status, timestamps |
+| TicketEvent | organisationId, ticketId, actorUserId, eventType, before/after values, createdAt |
+| Comment | organisationId, ticketId, authorUserId, visibility, body, createdAt |
+| Attachment | organisationId, ticketId, uploaderUserId, objectKey, contentType, sizeBytes, status |
+| Watcher | organisationId, ticketId, userId; unique ticket/user pair |
+| ActiveAssignment | organisationId, ticketId, technicianUserId, assignedBy, assignedAt; one active assignment per ticket |
+
+All tenant-owned tables, including join/history tables, must carry `organisationId`. Exact field names and Prisma relation definitions are subject to design review.
+
+### 18.3 Ticket lifecycle and transition rules
+
+The required states are: `new`, `triaged`, `assigned`, `in_progress`, `on_hold`, `resolved` and `closed`.
+
+The requirements name the states and require a strict state machine, but do not spell out every permitted edge. The following is therefore a proposed transition policy for mentor review:
+
+| Current state | Proposed next state(s) |
+|---|---|
+| new | triaged |
+| triaged | assigned |
+| assigned | in_progress |
+| in_progress | on_hold, resolved |
+| on_hold | in_progress |
+| resolved | closed; reopen to in_progress only inside the configured reopen window |
+| closed | no transition unless an explicit policy is approved |
+
+The service layer must validate the transition. A status change and its TicketEvent record must be written in one database transaction. The API must reject illegal transitions with a consistent 4xx error. The reopen window must be configurable, not hard-coded.
+
+### 18.4 Assignment concurrency
+
+The critical assignment operation must be transactional.
+
+Proposed behavior:
+1. Authenticate the caller and establish organisation context.
+2. Confirm the ticket and technician belong to the same organisation.
+3. Confirm the technician covers the ticket's property and has the required skills.
+4. Perform a conditional write or row-locked transaction so only one concurrent request can claim an unassigned ticket.
+5. Create the assignment record and audit event only for the winning request.
+6. Return a conflict response to losing concurrent requests.
+
+Acceptance test: send 20 parallel assignment requests for the same unassigned ticket and verify that exactly one active assignment exists. Reassignment behavior, if required, must be separately specified and must preserve history.
+
+### 18.5 API conventions
+
+- All application routes use the `/api/v1` prefix.
+- Request bodies, query strings and path parameters are validated using Zod.
+- List endpoints use cursor pagination; response metadata includes the next cursor when more records exist.
+- Create endpoints accept an idempotency key and persist the result for safe retries.
+- OpenAPI documentation is published at `/docs`.
+- Proposed uniform error shape:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "The request is invalid.",
+    "requestId": "request-id"
+  }
+}
+```
+
+The error format is a design proposal and should be implemented consistently by the API error handler.
+
+### 18.6 Attachments
+
+1. The authenticated user requests an upload URL for a permitted image or PDF.
+2. The API checks organisation access, ticket access, declared file size and allowed content type.
+3. The API returns a short-lived presigned URL for the configured S3-compatible storage.
+4. After upload, the server verifies the stored object's actual type and size before marking it accepted.
+5. A BullMQ worker generates a thumbnail for supported images.
+6. Attachment metadata and processing status are stored against the ticket and organisation.
+
+The browser must not be trusted as the sole source of file type or size validation.
+
+### 18.7 Email-to-ticket
+
+- An inbound provider webhook or compatible mock endpoint accepts the required inbound email payload.
+- The backend normalises sender, subject, body and provider message identifiers.
+- A new message creates a ticket, or a reply token in the subject identifies an existing ticket to thread onto.
+- Webhook processing must be idempotent so provider retries do not create duplicate tickets/comments.
+- Provider signature verification must be used when a real provider is configured.
+- The mock endpoint must preserve the same application payload contract if a free provider plan is unavailable.
+
+### 18.8 Comments and real-time updates
+
+- Each comment is marked `internal` or `public`.
+- Residents can see public comments only. Staff-only internal comments must never be sent to resident responses or resident Socket.io rooms.
+- Socket.io connections must be authenticated before joining rooms.
+- Room membership must be scoped by organisation and authorised ticket access; the client must not choose an arbitrary tenant room.
+- A committed ticket change emits an event to authorised users only. The database remains the source of truth if a client misses a real-time event.
+
+### 18.9 Background jobs and reliability
+
+BullMQ workers will be used for asynchronous tasks such as thumbnail generation and inbound email processing where appropriate.
+
+- Retry transient failures with backoff.
+- Move exhausted jobs to a dead-letter queue.
+- Provide an admin-visible failed-job view and a controlled replay operation.
+- Make job handlers idempotent.
+- Expose `/health` for process health and `/ready` for dependency readiness.
+- Verify recovery by stopping a worker during a job and demonstrating that processing resumes safely.
+
+### 18.10 Proposed role-by-action matrix
+
+The project document requires a permission matrix but does not prescribe exact role names or every permission. This initial matrix is a proposal for review.
+
+| Action | Resident | Technician | Admin / Staff |
+|---|---:|---:|---:|
+| Create a ticket | Own organisation | As permitted by policy | Yes |
+| View a ticket | Own tickets | Assigned/authorised tickets | Organisation scope |
+| Change ticket status | No | Assigned tickets, permitted transitions | Permitted administrative transitions |
+| Assign a technician | No | No | Yes |
+| Add public comment | Own/authorised tickets | Authorised tickets | Yes |
+| Add internal comment | No | Yes | Yes |
+| View internal comments | No | Yes | Yes |
+| Manage organisation/property/unit | No | No | Permission-controlled |
+
+The final matrix must be approved and each protected route must have at least one permitted-role test and one denied-role test.
+
+### 18.11 Acceptance-criteria traceability
+
+| Acceptance criterion | Implementation evidence | Automated/manual verification |
+|---|---|---|
+| AC-1.1 Tenant isolation | Authenticated tenant context and scoped repositories | Organisation A requests B's ticket ID and receives 404 |
+| AC-1.2 Safe assignment | Transaction/conditional write and active-assignment constraint | 20 parallel requests produce exactly one active assignment |
+| AC-1.3 Full ticket lifecycle | State transition service and event timeline | Playwright journey from ticket creation through closure on production |
+| AC-1.4 CR-1 merge | Merge service moves comments/watchers and closes duplicate | Automated service/API tests and production demonstration; impact estimate in release notes |
+| AC-1.5 Client-specific rule | Confirmed client rule implemented in the correct flow | At least one automated test and demonstration |
+
+### 18.12 Phase 1 scope boundary for SLA behavior
+
+The product title includes an SLA engine and the business context discusses agreed handling times and SLA compliance. This Phase 1 document is specifically Ticketing Core and does not define a detailed SLA calculation, pause calendar, escalation policy or breach-notification algorithm. This design therefore does not invent those rules. Any SLA behavior required in Phase 1 must be clarified from the assigned client requirement or a revised programme instruction.
+
+### 18.13 Decisions still requiring confirmation
+
+- Assigned client and the exact FR-1.08 rule from the LogicVeda Team Workspace.
+- Whether the solo intern owns all product modules or a defined subset.
+- Mentor-confirmed backend framework choice (Express or NestJS).
+- Final role names, permissions and transition edges.
+- Reopen-window duration and who may reopen.
+- Email provider or mock endpoint contract.
+- S3-compatible storage provider and free-tier configuration.
+- Whether an existing repository/team workflow must be followed.
+
+No pending item above should be represented as mentor-approved until confirmation is received.
