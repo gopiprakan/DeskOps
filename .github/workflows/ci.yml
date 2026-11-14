@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  foundation-checks:
+    name: Foundation checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Verify Node.js version
+        run: node --version
+
+      - name: Validate required project files
+        run: |
+          test -f README.md
+          test -f docs/technical-design.md
+          test -f .env.example
+          test -f docker-compose.yml
+          test -f .nvmrc
+
+      - name: Validate Docker Compose configuration
+        run: docker compose config --quiet
+
+      - name: Check example environment file for common credential patterns
+        shell: bash
+        run: |
+          if grep -En '(gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9]{20,})' .env.example; then
+            echo "Possible secret found in .env.example. Use placeholders only."
+            exit 1
+          fi
+
+# This is foundation CI only. Add frontend/backend install, lint, typecheck,
+# unit, API and Playwright jobs after their package manifests and tests exist.
